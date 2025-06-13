@@ -1,25 +1,28 @@
-"""Discord Tasks & Meetings Bot
---------------------------------
-Fonctionnalités :
-- Gestion de tâches (ajout, liste, terminer) avec rôles assigners.
-- Tâches créées via slash-command ou modal (pour description multiline).
-- Ping automatique de rappel toutes les 72 h dans le channel système.
-- Rappels H-24 et H-1 en DM pour les deadlines.
-- Commande /reunion_creer qui crée un Scheduled Event Discord.
-- Log détaillé avec Loguru.
+"""Discord Tasks & Meetings Bot (version sans dépendance loguru)
+-----------------------------------------------------------------
+- Gestion de tâches avec modals, rappels DM & channel.
+- Planification de réunions (/reunion_creer) via Scheduled Events.
+- Logging basé sur la bibliothèque standard `logging`.
 """
 
-import os, datetime as dt, asyncio
+import os, datetime as dt, asyncio, logging
 import aiosqlite, discord
 from discord.ext import commands, tasks
 from discord import app_commands
 from dotenv import load_dotenv
-from loguru import logger
 
+# ---------- Config & logging ----------
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 
-# ---------------- Intents ----------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()]
+)
+logger = logging.getLogger("TaskBot")
+
+# ---------- Intents ----------
 INTENTS = discord.Intents.default()
 INTENTS.members = True
 INTENTS.guilds = True
@@ -27,7 +30,7 @@ INTENTS.guilds = True
 bot = commands.Bot(command_prefix="!", intents=INTENTS)
 DB_PATH = "tasks.db"
 
-# ---------------- Roles ------------------
+# ---------- Rôles ----------
 ASSIGNER_ROLE_IDS = [
     1379270374914789577, 1379270378672885811, 1379270389343191102,
     1379270382405554266, 1379270385861660703, 1379270400688652342,
@@ -35,7 +38,7 @@ ASSIGNER_ROLE_IDS = [
 ]
 UNASSIGNABLE_ROLE_IDS = [1379270374914789577]
 
-# ---------------- Helpers ----------------
+# ---------- Helpers rôles ----------
 def user_is_allowed(inter: discord.Interaction) -> bool:
     m = inter.user
     return isinstance(m, discord.Member) and any(r.id in ASSIGNER_ROLE_IDS for r in m.roles)
@@ -50,8 +53,8 @@ def role_guard():
 def can_be_assigned(member: discord.Member) -> bool:
     return all(r.id not in UNASSIGNABLE_ROLE_IDS for r in member.roles)
 
-# ---------- Database --------------------
-CREATE_TASKS_SQL = """CREATE TABLE IF NOT EXISTS tasks (
+# ---------- Database ----------
+CREATE_SQL = """CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     guild_id INTEGER,
     author_id INTEGER,
@@ -65,13 +68,14 @@ CREATE_TASKS_SQL = """CREATE TABLE IF NOT EXISTS tasks (
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(CREATE_TASKS_SQL)
+        await db.execute(CREATE_SQL)
         await db.commit()
 
 async def add_task(guild_id, author_id, descr, deadline, assignee_id):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT INTO tasks (guild_id, author_id, description, deadline, assignee_id) VALUES (?,?,?,?,?)",
+            "INSERT INTO tasks (guild_id, author_id, description, deadline, assignee_id)"
+            " VALUES (?,?,?,?,?)",
             (guild_id, author_id, descr, deadline, assignee_id)
         )
         await db.commit()
@@ -88,7 +92,7 @@ async def complete_task(task_id, guild_id):
         await db.execute("UPDATE tasks SET done=1 WHERE id=? AND guild_id=?", (task_id, guild_id))
         await db.commit()
 
-# ---------- UI: Modal -------------------
+# ---------- UI Modal ----------
 class TaskModal(discord.ui.Modal, title="Nouvelle tâche"):
     description = discord.ui.TextInput(label="Description", style=discord.TextStyle.paragraph)
     deadline = discord.ui.TextInput(
@@ -109,11 +113,10 @@ class TaskModal(discord.ui.Modal, title="Nouvelle tâche"):
             except ValueError:
                 await inter.response.send_message("Date invalide. Format attendu AAAA-MM-JJ HH:MM", ephemeral=True)
                 return
-        await add_task(inter.guild_id, inter.user.id, self.description.value,
-                       deadline_str, self.assignee.id)
-        await inter.response.send_message(f"✅ Tâche pour {self.assignee.mention} créée !", ephemeral=False)
+        await add_task(inter.guild_id, inter.user.id, self.description.value, deadline_str, self.assignee.id)
+        await inter.response.send_message(f"✅ Tâche pour {self.assignee.mention} créée !")
 
-# ---------- Commands --------------------
+# ---------- Slash-commands ----------
 @bot.tree.command(name="tache_modal", description="Créer une tâche via formulaire")
 @role_guard()
 @app_commands.describe(membre="Membre assigné")
@@ -144,7 +147,6 @@ async def tache_faite(inter: discord.Interaction, id: int):
     await complete_task(id, inter.guild_id)
     await inter.response.send_message("🎯 Bravo, c’est coché !")
 
-# ---------- Meeting / Scheduled Event ----
 @bot.tree.command(name="reunion_creer", description="Planifier une réunion Discord")
 @role_guard()
 @app_commands.describe(
@@ -159,11 +161,10 @@ async def reunion_creer(inter: discord.Interaction,
                         heure: str,
                         canal_vocal: discord.VoiceChannel):
     try:
-        start = dt.datetime.strptime(f"{date} {heure}", "%Y-%m-%d %H:%M")
+        start = dt.datetime.strptime(f"{date} {heure}", "%Y-%m-%d %H:%M").replace(tzinfo=dt.timezone.utc)
     except ValueError:
         await inter.response.send_message("Format date/heure invalide.", ephemeral=True)
         return
-    start = start.replace(tzinfo=dt.timezone.utc)
     end = start + dt.timedelta(hours=1)
     event = await inter.guild.create_scheduled_event(
         name=sujet,
@@ -175,10 +176,10 @@ async def reunion_creer(inter: discord.Interaction,
         privacy_level=discord.PrivacyLevel.guild_only
     )
     await inter.response.send_message(
-        f"📅 Réunion **{sujet}** planifiée : <t:{int(start.timestamp())}:F> dans {canal_vocal.mention}\n▶️ Évènement créé : <#{event.id}>"
+        f"📅 Réunion **{sujet}** planifiée : <t:{int(start.timestamp())}:F> dans {canal_vocal.mention}\n▶️ <#{event.id}>"
     )
 
-# ---------- Reminders --------------------
+# ---------- Reminders ----------
 @tasks.loop(hours=72)
 async def channel_reminder():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -195,7 +196,7 @@ async def channel_reminder():
 
 @tasks.loop(minutes=1)
 async def deadline_watchdog():
-    now = dt.datetime.utcnow()
+    now = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
     async with aiosqlite.connect(DB_PATH) as db:
         rows = await db.execute_fetchall(
             "SELECT id, description, deadline, assignee_id, reminded_24, reminded_1 FROM tasks WHERE done=0 AND deadline IS NOT NULL"
@@ -207,7 +208,8 @@ async def deadline_watchdog():
             continue
         diff = (deadline - now).total_seconds()
         member = bot.get_user(uid)
-        if member is None: continue
+        if member is None:
+            continue
         if 0 < diff <= 3600 and not rem1:
             await member.send(f"⏰ *Rappel* : la tâche « {descr} » est due dans moins d'une heure !")
             async with aiosqlite.connect(DB_PATH) as db:
@@ -219,16 +221,15 @@ async def deadline_watchdog():
                 await db.execute("UPDATE tasks SET reminded_24=1 WHERE id=?", (_id,))
                 await db.commit()
 
-# ---------- Error handling --------------
+# ---------- Error Handling ----------
 @bot.tree.error
 async def on_app_error(inter: discord.Interaction, error: app_commands.AppCommandError):
     await inter.response.send_message(f"⛔ {error.__class__.__name__}: {error}", ephemeral=True)
-    logger.error(f"Slash error: {error}")
+    logger.exception(f"Slash error: {error}")
 
-# ---------- Events ----------------------
+# ---------- Events ----------
 @bot.event
 async def on_ready():
-    logger.add("bot.log", rotation="500 KB")
     await init_db()
     await bot.tree.sync()
     if not channel_reminder.is_running():
@@ -237,5 +238,6 @@ async def on_ready():
         deadline_watchdog.start()
     logger.info(f"Connecté en tant que {bot.user} ({bot.user.id})")
 
+# ---------- Main ----------
 if __name__ == "__main__":
     bot.run(TOKEN)

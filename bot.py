@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# bot.py – Gestion de missions & réunions (deadline picker corrigé)
+# bot.py – Gestion de missions & réunions (relative + dates réelles)
 # =================================================================
 
 import os
@@ -12,7 +12,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-# ─── Configuration & logging ─────────────────────────────────────
+# ─── Config & Logging ─────────────────────────────────────
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("MgmtBot")
 
-# ─── Intents & Bot ───────────────────────────────────────────────
+# ─── Intents & Bot ───────────────────────────────────────
 INTENTS = discord.Intents.default()
 INTENTS.guilds  = True
 INTENTS.members = True
@@ -31,7 +31,7 @@ INTENTS.members = True
 bot = commands.Bot(command_prefix=None, intents=INTENTS)
 DB_PATH = "missions.db"
 
-# ─── Rôles autorisés ─────────────────────────────────────────────
+# ─── Rôles autorisés ─────────────────────────────────────
 ASSIGNER_ROLES = [
     1379270374914789577,  # chef (attribue sans recevoir)
     1379270378672885811,
@@ -54,7 +54,7 @@ def guard():
         return True
     return app_commands.check(predicate)
 
-# ─── Base SQLite & helpers ───────────────────────────────────────
+# ─── Base SQLite & helpers ───────────────────────────────
 CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS missions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,7 +108,7 @@ async def update_mission_status(mid, guild, user_id, new_status):
         await db.commit()
         return True
 
-# ─── Pagination View ────────────────────────────────────────────
+# ─── Pagination View ────────────────────────────────────
 PAGE_SIZE = 20
 class MissionPager(discord.ui.View):
     def __init__(self, data, title: str, timeout: int = 180):
@@ -143,33 +143,42 @@ class MissionPager(discord.ui.View):
             self.page += 1
             await inter.response.edit_message(embed=self.make_embed(), view=self)
 
-# ─── Slash-Commands : Missions ────────────────────────────────
-@bot.tree.command(name="mission_add", description="Ajouter une mission")
+# ─── Slash-Commands : Missions ────────────────────────────
+@bot.tree.command(name="mission_add", description="Ajouter une mission (jours/heures/minutes)")
 @guard()
 @app_commands.describe(
     membre="Membre assigné",
     description="Description de la mission",
-    deadline="Date et heure limite (UTC) – facultatif"
+    jours="Jours à partir de maintenant (défaut 0)",
+    heures="Heures à partir de maintenant (défaut 0)",
+    minutes="Minutes à partir de maintenant (défaut 0)"
 )
 async def mission_add(
     inter: discord.Interaction,
     membre: discord.Member,
     description: str,
-    deadline: dt.datetime = None
+    jours: int = 0,
+    heures: int = 0,
+    minutes: int = 0
 ):
     if membre.id == BLOCKED_RECEIVER:
         return await inter.response.send_message(
-            f"🚫 {membre.mention} ne peut pas recevoir de missions.",
-            ephemeral=True
+            f"🚫 {membre.mention} ne peut pas recevoir de missions.", ephemeral=True
         )
 
-    dl_iso = deadline.isoformat() if deadline else None
+    delta = dt.timedelta(days=jours, hours=heures, minutes=minutes)
+    if delta.total_seconds() > 0:
+        due = dt.datetime.now(dt.timezone.utc) + delta
+        dl_iso = due.isoformat()
+        ts = int(due.timestamp())
+    else:
+        dl_iso = None
+
     await add_mission(inter.guild_id, inter.user.id, membre.id, description, dl_iso)
 
     msg = f"✅ Mission assignée à {membre.mention}"
-    if deadline:
-        ts = int(deadline.timestamp())
-        msg += f", échéance <t:{ts}:F>."
+    if dl_iso:
+        msg += f", échéance dans {jours}j {heures}h {minutes}m (<t:{ts}:F>)."
     else:
         msg += "."
     await inter.response.send_message(msg)
@@ -213,47 +222,47 @@ async def mission_update(inter: discord.Interaction, id: int, statut: str):
         )
     await inter.response.send_message(f"✅ Statut mis à jour : **{statut}**")
 
-# ─── Slash-Commands : Réunions ───────────────────────────────
-@bot.tree.command(name="meeting_create", description="Planifier une réunion")
+# ─── Slash-Commands : Réunions ─────────────────────────────
+@bot.tree.command(name="meeting_create", description="Planifier une réunion (date & heure réelles)")
 @guard()
 @app_commands.describe(
-    sujet="Titre",
-    start="Date et heure de début (UTC)",
-    duration="Durée en heures"
+    sujet="Titre de la réunion",
+    date="Date (YYYY-MM-DD)",
+    heure="Heure (HH:MM, 24h)",
+    canal="Salon vocal",
+    duree="Durée en heures (ex: 1.5)"
 )
 async def meeting_create(
     inter: discord.Interaction,
     sujet: str,
-    start: dt.datetime,
-    duration: float = 1.0
+    date: str,
+    heure: str,
+    canal: discord.VoiceChannel,
+    duree: float = 1.0
 ):
-    end = start + dt.timedelta(hours=duration)
-    await inter.response.defer(thinking=True)
+    try:
+        start = dt.datetime.strptime(f"{date} {heure}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        return await inter.response.send_message(
+            "🗓 Format invalide : date=YYYY-MM-DD et heure=HH:MM", ephemeral=True
+        )
+    start = start.replace(tzinfo=dt.timezone.utc)
+    end   = start + dt.timedelta(hours=duree)
     event = await inter.guild.create_scheduled_event(
         name=sujet,
         start_time=start,
         end_time=end,
         description=f"Réunion planifiée par {inter.user.display_name}",
+        channel=canal,
         entity_type=discord.EntityType.voice,
         privacy_level=discord.PrivacyLevel.guild_only
     )
-    await inter.followup.send(
-        f"📅 Réunion **{sujet}** du <t:{int(start.timestamp())}:F> au <t:{int(end.timestamp())}:F>."
+    await inter.response.send_message(
+        f"📅 Réunion **{sujet}** du <t:{int(start.timestamp())}:F> "
+        f"au <t:{int(end.timestamp())}:F> dans {canal.mention}."
     )
 
-@bot.tree.command(name="meeting_list", description="Afficher les réunions à venir")
-async def meeting_list(inter: discord.Interaction):
-    now = dt.datetime.now(dt.timezone.utc)
-    events = [e for e in inter.guild.scheduled_events if e.start_time > now]
-    if not events:
-        return await inter.response.send_message("📭 Aucune réunion programmée.")
-    embed = discord.Embed(title="Réunions à venir", colour=discord.Colour.purple())
-    for e in events:
-        ts = int(e.start_time.timestamp())
-        embed.add_field(name=e.name, value=f"<t:{ts}:F> dans {e.channel.mention}", inline=False)
-    await inter.response.send_message(embed=embed)
-
-# ─── Rappels & deadlines ──────────────────────────────────────
+# ─── Rappels & deadlines ────────────────────────────────────
 @tasks.loop(hours=72)
 async def notify_channel():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -293,13 +302,13 @@ async def deadline_check():
                 await db2.execute("UPDATE missions SET reminded_24=1 WHERE id=?", (mid,))
                 await db2.commit()
 
-# ─── Gestion d’erreurs globales ─────────────────────────────
+# ─── Gestion d’erreurs globales ───────────────────────────
 @bot.tree.error
 async def on_app_error(inter: discord.Interaction, err: app_commands.AppCommandError):
     await inter.response.send_message(f"⚠️ Erreur : {err}", ephemeral=True)
     logger.exception(err)
 
-# ─── Lancement ﹘ on_ready ﹘ main ─────────────────────────────
+# ─── Launch ────────────────────────────────────────────────
 @bot.event
 async def on_ready():
     await init_db()

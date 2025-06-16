@@ -32,19 +32,21 @@ bot = commands.Bot(command_prefix=None, intents=INTENTS)
 DB = "missions.db"
 
 # ─── Rôles autorisés ─────────────────────────────────────
-# Rôles autorisés à gérer missions & réunions
+# Rôles autorisés à créer/attribuer des missions
 ASSIGNER_ROLES = [
-    1379270374914789577,  # Chef (peut attribuer, ne reçoit pas)
+    1379270374914789577,  # ne peut pas recevoir, mais peut attribuer
     1379270378672885811,
-    1379270389343191102,
-    1379270382405554266,
-    1379270385861660703,
     1379270400688652342,
+    1379270385861660703,
+    1379270408007716914,
+    1379270382405554266,
     1382834652162818089,
+    1379270389343191102,
 ]
 
 # Rôle qui ne peut PAS recevoir de mission
 BLOCKED_RECEIVER = 1379270374914789577
+
 
 
 def is_assigner(inter: discord.Interaction) -> bool:

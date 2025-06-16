@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# bot.py – Gestion de missions & réunions (deadline picker)
-# ========================================================
+# bot.py – Gestion de missions & réunions (deadline picker corrigé)
+# =================================================================
 
 import os
 import datetime as dt
 import logging
-from typing import Optional
 
 import aiosqlite
 import discord
@@ -13,7 +12,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-# ─── Config & Logging ─────────────────────────────────────
+# ─── Configuration & logging ─────────────────────────────────────
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -24,15 +23,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("MgmtBot")
 
-# ─── Intents & Bot ───────────────────────────────────────
+# ─── Intents & Bot ───────────────────────────────────────────────
 INTENTS = discord.Intents.default()
-INTENTS.members = True
 INTENTS.guilds  = True
+INTENTS.members = True
 
 bot = commands.Bot(command_prefix=None, intents=INTENTS)
 DB_PATH = "missions.db"
 
-# ─── Rôles autorisés ─────────────────────────────────────
+# ─── Rôles autorisés ─────────────────────────────────────────────
 ASSIGNER_ROLES = [
     1379270374914789577,  # chef (attribue sans recevoir)
     1379270378672885811,
@@ -45,8 +44,8 @@ ASSIGNER_ROLES = [
 BLOCKED_RECEIVER = 1379270374914789577  # ne peut pas recevoir de mission
 
 def is_assigner(inter: discord.Interaction) -> bool:
-    member = inter.user
-    return isinstance(member, discord.Member) and any(r.id in ASSIGNER_ROLES for r in member.roles)
+    m = inter.user
+    return isinstance(m, discord.Member) and any(r.id in ASSIGNER_ROLES for r in m.roles)
 
 def guard():
     async def predicate(inter: discord.Interaction):
@@ -55,7 +54,7 @@ def guard():
         return True
     return app_commands.check(predicate)
 
-# ─── Base SQLite & helpers ───────────────────────────────
+# ─── Base SQLite & helpers ───────────────────────────────────────
 CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS missions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,13 +69,12 @@ CREATE TABLE IF NOT EXISTS missions (
     reminded_1  BOOLEAN DEFAULT 0
 );
 """
-
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(CREATE_SQL)
         await db.commit()
 
-async def add_mission(guild, author, assignee, desc, dl_iso: Optional[str]):
+async def add_mission(guild, author, assignee, desc, dl_iso):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO missions (guild, author, assignee, description, deadline) VALUES (?,?,?,?,?)",
@@ -84,26 +82,22 @@ async def add_mission(guild, author, assignee, desc, dl_iso: Optional[str]):
         )
         await db.commit()
 
-async def list_missions(guild, done: Optional[bool]):
+async def list_missions(guild, done_flag):
     async with aiosqlite.connect(DB_PATH) as db:
-        if done is None:
-            rows = await db.execute_fetchall(
-                "SELECT id, description, deadline, assignee, status FROM missions WHERE guild=? ORDER BY id",
-                (guild,)
-            )
+        if done_flag is None:
+            sql  = "SELECT id, description, deadline, assignee, status FROM missions WHERE guild=? ORDER BY id"
+            args = (guild,)
         else:
-            rows = await db.execute_fetchall(
-                "SELECT id, description, deadline, assignee, status FROM missions WHERE guild=? AND done=? ORDER BY id",
-                (guild, int(done))
-            )
-    return rows
+            sql  = "SELECT id, description, deadline, assignee, status FROM missions WHERE guild=? AND done=? ORDER BY id"
+            args = (guild, int(done_flag))
+        return await db.execute_fetchall(sql, args)
 
 async def complete_mission(mid, guild):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE missions SET done=1 WHERE id=? AND guild=?", (mid, guild))
         await db.commit()
 
-async def update_mission_status(mid, guild, user_id, new_status: str) -> bool:
+async def update_mission_status(mid, guild, user_id, new_status):
     async with aiosqlite.connect(DB_PATH) as db:
         row = await db.execute_fetchall(
             "SELECT assignee FROM missions WHERE id=? AND guild=?", (mid, guild)
@@ -114,10 +108,10 @@ async def update_mission_status(mid, guild, user_id, new_status: str) -> bool:
         await db.commit()
         return True
 
-# ─── Pagination View ──────────────────────────────────────
+# ─── Pagination View ────────────────────────────────────────────
 PAGE_SIZE = 20
 class MissionPager(discord.ui.View):
-    def __init__(self, data: list[tuple], title: str, timeout: int = 180):
+    def __init__(self, data, title: str, timeout: int = 180):
         super().__init__(timeout=timeout)
         self.data  = data
         self.title = title
@@ -129,7 +123,6 @@ class MissionPager(discord.ui.View):
         for mid, desc, dl_iso, uid, status in self.data[start:start+PAGE_SIZE]:
             line = f"**#{mid}** – {desc}"
             if dl_iso:
-                # affiche date avec markdown Discord
                 ts = int(dt.datetime.fromisoformat(dl_iso).timestamp())
                 line += f" _(échéance <t:{ts}:F>)_"
             line += f" ➜ <@{uid}> — **{status}**"
@@ -138,22 +131,19 @@ class MissionPager(discord.ui.View):
         embed.set_footer(text=f"Page {self.page+1}/{total}")
         return embed
 
-    async def update(self, inter: discord.Interaction):
-        await inter.response.edit_message(embed=self.make_embed(), view=self)
-
     @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
     async def prev(self, inter: discord.Interaction, _):
         if self.page > 0:
             self.page -= 1
-            await self.update(inter)
+            await inter.response.edit_message(embed=self.make_embed(), view=self)
 
     @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
     async def next(self, inter: discord.Interaction, _):
-        if (self.page + 1) * PAGE_SIZE < len(self.data):
+        if (self.page+1)*PAGE_SIZE < len(self.data):
             self.page += 1
-            await self.update(inter)
+            await inter.response.edit_message(embed=self.make_embed(), view=self)
 
-# ─── Slash-Commands : Missions ────────────────────────────
+# ─── Slash-Commands : Missions ────────────────────────────────
 @bot.tree.command(name="mission_add", description="Ajouter une mission")
 @guard()
 @app_commands.describe(
@@ -165,20 +155,17 @@ async def mission_add(
     inter: discord.Interaction,
     membre: discord.Member,
     description: str,
-    deadline: Optional[dt.datetime] = None
+    deadline: dt.datetime = None
 ):
-    # bloque certains destinataires
     if membre.id == BLOCKED_RECEIVER:
         return await inter.response.send_message(
-            f"🚫 {membre.mention} ne peut pas recevoir de missions.", ephemeral=True
+            f"🚫 {membre.mention} ne peut pas recevoir de missions.",
+            ephemeral=True
         )
 
-    # isoformat pour stockage
     dl_iso = deadline.isoformat() if deadline else None
-
     await add_mission(inter.guild_id, inter.user.id, membre.id, description, dl_iso)
 
-    # confirmation avec formatting Discord
     msg = f"✅ Mission assignée à {membre.mention}"
     if deadline:
         ts = int(deadline.timestamp())
@@ -190,12 +177,14 @@ async def mission_add(
 @bot.tree.command(name="mission_list", description="Lister les missions")
 @app_commands.describe(etat="open|done|all (défaut open)")
 async def mission_list(inter: discord.Interaction, etat: str = "open"):
-    match etat:
-        case "open":  flag, title = False, "Missions en cours"
-        case "done":  flag, title = True,  "Missions terminées"
-        case "all":   flag, title = None,  "Toutes les missions"
-        case _:
-            return await inter.response.send_message("🛑 état invalide.", ephemeral=True)
+    if etat == "open":
+        flag, title = False, "Missions en cours"
+    elif etat == "done":
+        flag, title = True,  "Missions terminées"
+    elif etat == "all":
+        flag, title = None,  "Toutes les missions"
+    else:
+        return await inter.response.send_message("🛑 état invalide.", ephemeral=True)
 
     rows = await list_missions(inter.guild_id, flag)
     if not rows:
@@ -224,21 +213,22 @@ async def mission_update(inter: discord.Interaction, id: int, statut: str):
         )
     await inter.response.send_message(f"✅ Statut mis à jour : **{statut}**")
 
-# ─── Slash-Commands : Réunions ───────────────────────────
+# ─── Slash-Commands : Réunions ───────────────────────────────
 @bot.tree.command(name="meeting_create", description="Planifier une réunion")
 @guard()
 @app_commands.describe(
     sujet="Titre",
     start="Date et heure de début (UTC)",
-    duration="Durée en heures (ex : 1.5)"
+    duration="Durée en heures"
 )
 async def meeting_create(
     inter: discord.Interaction,
     sujet: str,
     start: dt.datetime,
-    duration: Optional[float] = 1.0
+    duration: float = 1.0
 ):
     end = start + dt.timedelta(hours=duration)
+    await inter.response.defer(thinking=True)
     event = await inter.guild.create_scheduled_event(
         name=sujet,
         start_time=start,
@@ -247,7 +237,7 @@ async def meeting_create(
         entity_type=discord.EntityType.voice,
         privacy_level=discord.PrivacyLevel.guild_only
     )
-    await inter.response.send_message(
+    await inter.followup.send(
         f"📅 Réunion **{sujet}** du <t:{int(start.timestamp())}:F> au <t:{int(end.timestamp())}:F>."
     )
 
@@ -263,7 +253,7 @@ async def meeting_list(inter: discord.Interaction):
         embed.add_field(name=e.name, value=f"<t:{ts}:F> dans {e.channel.mention}", inline=False)
     await inter.response.send_message(embed=embed)
 
-# ─── Rappels automatiques & deadlines ─────────────────────
+# ─── Rappels & deadlines ──────────────────────────────────────
 @tasks.loop(hours=72)
 async def notify_channel():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -289,27 +279,27 @@ async def deadline_check():
         except Exception:
             continue
         diff = (due - now).total_seconds()
-        member = bot.get_user(uid)
-        if not member:
+        user = bot.get_user(uid)
+        if not user:
             continue
         if 0 < diff <= 3600 and not r1:
-            await member.send(f"⏰ La mission « {desc} » est due dans 1 h !")
+            await user.send(f"⏰ La mission « {desc} » est due dans 1 h !")
             async with aiosqlite.connect(DB_PATH) as db2:
                 await db2.execute("UPDATE missions SET reminded_1=1 WHERE id=?", (mid,))
                 await db2.commit()
         elif 3600 < diff <= 86400 and not r24:
-            await member.send(f"⏰ La mission « {desc} » est due dans 24 h .")
+            await user.send(f"⏰ La mission « {desc} » est due dans 24 h !")
             async with aiosqlite.connect(DB_PATH) as db2:
                 await db2.execute("UPDATE missions SET reminded_24=1 WHERE id=?", (mid,))
                 await db2.commit()
 
-# ─── Gestion d’erreurs globales ───────────────────────────
+# ─── Gestion d’erreurs globales ─────────────────────────────
 @bot.tree.error
 async def on_app_error(inter: discord.Interaction, err: app_commands.AppCommandError):
     await inter.response.send_message(f"⚠️ Erreur : {err}", ephemeral=True)
     logger.exception(err)
 
-# ─── Lancement du bot ─────────────────────────────────────
+# ─── Lancement ﹘ on_ready ﹘ main ─────────────────────────────
 @bot.event
 async def on_ready():
     await init_db()
